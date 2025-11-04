@@ -1,0 +1,85 @@
+#!/bin/sh
+# 自定义网络初始化脚本：禁用IPv6 + 禁用dnsmasq + 禁用odhcpd + 禁用IPv6防火墙 + 设置LAN
+
+#3.0 ---- LAN 配置 ----
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.0.8'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.gateway='192.168.0.6'
+uci add_list network.lan.dns='127.0.0.1'
+
+#3.0 ---- 禁用 IPv6 ----
+uci set network.lan.ip6assign='0'
+uci set network.lan.delegate='0'
+uci set network.globals.ula_prefix=''
+
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.ndp='disabled'
+
+#3.1加入 ✅ 遍历所有 network 节点，包括匿名 cfg 段（直接读取 /etc/config/network）
+for sec in $(grep -E '^\s*config ' /etc/config/network | awk '{print $2}' | sed "s/'//g" | sort -u); do
+    if [ "$sec" = "" ]; then
+        idx=0
+        for _ in $(grep -n "config " /etc/config/network | cut -d: -f1); do
+            uci set network.@device[$idx].ipv6='0' 2>/dev/null
+            uci set network.@interface[$idx].ipv6='0' 2>/dev/null
+            uci set network.@bridge-vlan[$idx].ipv6='0' 2>/dev/null
+            idx=$((idx + 1))
+        done
+    else
+        uci set network.${sec}.ipv6='0' 2>/dev/null
+    fi
+done
+
+#3.0 ---- 禁用 dnsmasq ----
+#uci set dhcp.@dnsmasq[0].enabled='0'
+
+#3.0 保留dnsmasq不做dhcp等
+uci set dhcp.lan.ignore='1'   # 不做 DHCP
+uci commit dhcp
+/etc/init.d/dnsmasq restart
+
+#3.0 ---- 禁用 odhcpd（IPv6 RA/DHCPv6 + IPv4 DHCP）----
+uci set dhcp.odhcpd=odhcpd
+uci set dhcp.odhcpd.enabled='0'
+uci set dhcp.odhcpd.maindhcp='0'
+uci set dhcp.odhcpd.leasefile='/tmp/hosts/odhcpd'
+uci set dhcp.odhcpd.leasetrigger='/usr/sbin/odhcpd-update'
+uci set dhcp.odhcpd.loglevel='4'
+/etc/init.d/odhcpd disable 2>/dev/null
+/etc/init.d/odhcpd stop 2>/dev/null
+
+#3.0 ---- 禁用防火墙 IPv6 规则 ----
+uci set firewall.@defaults[0].disable_ipv6='1'
+
+#3.0 ---- 系统时区和时间同步 ----
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci set system.@system[0].timezone='CST-8'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='time1.apple.com'
+
+#3.0 ---- 主机名 ----
+uci set system.@system[0].hostname='CWrtF3.1'
+
+#3.1引入新 ---- Sysctl 禁用 IPv6 ----
+grep -q "disable_ipv6" /etc/sysctl.conf || {
+    echo "net.ipv6.conf.all.disable_ipv6=1" >> /etc/sysctl.conf
+    echo "net.ipv6.conf.default.disable_ipv6=1" >> /etc/sysctl.conf
+    echo "net.ipv6.conf.*.disable_ipv6=1" >> /etc/sysctl.conf
+}
+
+#3.1 ✅ 彻底禁用 IPv6，包括 fe80:: 链路本地地址
+for iface in $(ls /sys/class/net); do
+    sysctl -w net.ipv6.conf.${iface}.disable_ipv6=1 >/dev/null 2>&1
+    ip addr flush dev ${iface} scope inet6 >/dev/null 2>&1
+done
+
+# ---- 保存并生效 ----
+uci commit network
+uci commit dhcp
+uci commit firewall
+uci commit system
+
+exit 0
